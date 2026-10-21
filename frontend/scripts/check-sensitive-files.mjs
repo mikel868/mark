@@ -7,7 +7,7 @@ const tracked = execFileSync('git', ['-C', root, 'ls-files'], { encoding: 'utf8'
 
 const forbidden = tracked.filter(
   (file) =>
-    /(^|\/)(\.env(?:\.(?!example$)[^/]+)?|\.htpasswd(?:\.local)?|htpasswd\.local|config\/application-local\.ya?ml|deploy\/k8s\/secret(?:\.example copy)?\.ya?ml|id_rsa|id_ed25519)$/i.test(
+    /(^|\/)(\.env(?:\.(?!example$)[^/]+)?|backend\.env|\.backend\.env\.[^/]+|\.htpasswd(?:\.local)?|htpasswd\.local|config\/application-local\.ya?ml|deploy\/k8s\/secret(?:\.example copy)?\.ya?ml|id_rsa|id_ed25519)$/i.test(
       file,
     ) ||
     /\.(?:pem|key|p12|pfx|dump|sql\.gz)$/i.test(file) ||

@@ -1,0 +1,56 @@
+services:
+  backend:
+    image: mark-backend:${RELEASE_SHA:?Missing release revision}
+    container_name: mark-backend
+    restart: unless-stopped
+    mem_limit: 640m
+    memswap_limit: 896m
+    env_file:
+      - path: ../../backend.env
+        format: raw
+    environment:
+      DB_URL: jdbc:postgresql://mark-postgres:5432/mark
+      DB_USERNAME: mark
+      SERVER_PORT: "8080"
+      JAVA_TOOL_OPTIONS: "-Xms96m -Xmx320m"
+    networks: [mark]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:8080/actuator/health/readiness",
+        ]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 12
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+  frontend:
+    image: mark-frontend:${RELEASE_SHA:?Missing release revision}
+    container_name: mark-frontend
+    restart: unless-stopped
+    mem_limit: 96m
+    memswap_limit: 128m
+    ports:
+      - "${HTTP_BIND_ADDRESS:-0.0.0.0}:${HTTP_PORT:-80}:80"
+    networks: [mark]
+    depends_on:
+      backend:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+networks:
+  mark:
+    external: true
+    name: mark-network

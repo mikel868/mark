@@ -1,0 +1,2 @@
+# Server key from the local known_hosts entry trusted during the user's SSH login.
+8.163.78.177 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAgbM2hvRh7Z68aI7OIP4PjsEzJmeZSKebiofDlW/GYW

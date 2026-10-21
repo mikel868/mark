@@ -6,14 +6,15 @@ INS、Google、TikTok、Ping0 的账号、申诉流程、记录和证据管理�
 
 2026-10-21 从现有项目做干净导入，不携带旧仓库提交历史、真实部署凭据、私密配置或业务备份。GitHub 工作副本位于 `D:\mark-github`；原 `D:\mark` 和 Gitea 仓库保留不变，后续 GitHub 开发请使用新目录。
 
-现有 GitHub Actions 用于质量检查和前后端联调，尚未配置向新云服务器自动部署。`.gitea/`、Kubernetes 清单和历史部署文档保留作参考，不代表 GitHub 已接入原服务器或新服务器。
+GitHub Actions 在 `main` 更新后执行检查、构建镜像并通过 SSH 部署到独立云服务器。首次仍需在服务器填写私密配置；流程出现“等待首次配置”不代表已经上线。具体步骤见 [云服务器部署](deploy/server/README.md)。`.gitea/`、Kubernetes 清单和旧部署文档保留作历史参考。
 
 ```text
 frontend/             Vue 3 + TypeScript + Element Plus
 backend/              Java 21 + Spring Boot + MyBatis-Plus + PostgreSQL
 docs/                 共享开发、测试与 CI 文档
 .gitea/workflows/     Gitea 前端、后端工作流
-.github/workflows/    GitHub 检查与同仓库联调
+.github/workflows/    GitHub 检查、同仓库联调与云服务器部署
+deploy/server/        复用现有 PostgreSQL 的独立服务器部署
 ```
 
 ## 本地开发

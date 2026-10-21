@@ -1,7 +1,8 @@
 name: Backend checks
 on:
+  workflow_call:
   push:
-    branches: ['**']
+    branches-ignore: ['main']
     paths: ['backend/**', '.github/workflows/backend.yml', '.gitignore', 'docs/**', 'README.md']
   pull_request:
     paths: ['backend/**', '.github/workflows/backend.yml', '.gitignore', 'docs/**', 'README.md']

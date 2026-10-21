@@ -1,0 +1,152 @@
+name: Deploy to cloud server
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths: ["deploy/server/**", ".github/workflows/deploy.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: mark-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  frontend:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/frontend.yml
+  backend:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/backend.yml
+  integration:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/integration.yml
+  deployment-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test deploy/server/deployment.test.mjs
+
+  build:
+    if: github.ref == 'refs/heads/main'
+    needs: [frontend, backend, integration, deployment-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      BUILD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build both images for this exact revision
+        run: |
+          docker build --label "org.opencontainers.image.revision=$BUILD_SHA" -t "mark-backend:$BUILD_SHA" backend
+          docker build --label "org.opencontainers.image.revision=$BUILD_SHA" -t "mark-frontend:$BUILD_SHA" frontend
+      - name: Verify the server-side password hash command without a database
+        run: |
+          docker run --rm --network none --entrypoint sh "mark-backend:$BUILD_SHA" -c 'command -v wget > /dev/null'
+          printf '%s\n' 'ci-only-password' | docker run --rm -i --network none --memory=192m \
+            --entrypoint java "mark-backend:$BUILD_SHA" -XX:MaxRAMPercentage=60 \
+            -Dloader.main=com.mark.appeal.auth.UserMaintenanceCommand \
+            -cp /app/app.jar org.springframework.boot.loader.launch.PropertiesLauncher hash > "$RUNNER_TEMP/test.hash"
+          grep -Eq '^\{bcrypt\}\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$' "$RUNNER_TEMP/test.hash"
+          rm -- "$RUNNER_TEMP/test.hash"
+      - name: Verify literal credentials in a real Compose container
+        run: |
+          work=$(mktemp -d)
+          mkdir -p "$work/releases/smoke"
+          cp deploy/server/compose.yml "$work/releases/smoke/compose.yml"
+          expected='ci-only-$literal:quotes"and\backslash'
+          printf 'DB_PASSWORD=%s\n' "$expected" > "$work/backend.env"
+          touch "$work/empty.env"
+          docker network create --internal mark-network
+          trap 'docker network rm mark-network >/dev/null 2>&1 || true; rm -f "$work/backend.env" "$work/empty.env" "$work/releases/smoke/compose.yml"; rmdir "$work/releases/smoke" "$work/releases" "$work"' EXIT
+          RELEASE_SHA="$BUILD_SHA" docker compose --project-name mark-image-smoke \
+            --env-file "$work/empty.env" -f "$work/releases/smoke/compose.yml" \
+            run --rm --no-deps --pull never --entrypoint sh -e EXPECTED_PASSWORD="$expected" \
+            backend -c 'test "$DB_PASSWORD" = "$EXPECTED_PASSWORD"'
+      - name: Package images and deployment files (no production credentials)
+        run: |
+          mkdir -p release
+          docker save "mark-backend:$BUILD_SHA" "mark-frontend:$BUILD_SHA" | gzip -1 > release/images.tar.gz
+          docker image inspect --format '{{.Id}}' "mark-backend:$BUILD_SHA" > release/backend.id
+          docker image inspect --format '{{.Id}}' "mark-frontend:$BUILD_SHA" > release/frontend.id
+          printf '%s\n' "$BUILD_SHA" > release/revision
+          cp deploy/server/compose.yml deploy/server/configure.sh deploy/server/deploy.sh release/
+          cd release
+          sha256sum images.tar.gz compose.yml configure.sh deploy.sh revision backend.id frontend.id > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-release
+          path: release/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BUILD_SHA: ${{ github.sha }}
+      DEPLOY_HOST: 8.163.78.177
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject an outdated revision before connecting to production
+        id: current
+        run: |
+          git fetch --no-tags origin refs/heads/main
+          if [[ "$(git rev-parse FETCH_HEAD)" != "$BUILD_SHA" ]]; then
+            echo 'A newer main revision exists. This deployment will not overwrite it.'
+            echo 'deploy=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.current.outputs.deploy == 'true'
+        with:
+          name: server-release
+          path: release/
+      - name: Transfer images and update applications through pinned SSH
+        if: steps.current.outputs.deploy == 'true'
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          : "${DEPLOY_SSH_KEY:?Add DEPLOY_SSH_KEY to GitHub Actions repository secrets}"
+          umask 077
+          ssh_dir=$(mktemp -d)
+          trap 'rm -f "$ssh_dir/key" "$ssh_dir/known_hosts"; rmdir "$ssh_dir"' EXIT
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$ssh_dir/key"
+          unset DEPLOY_SSH_KEY
+          cp deploy/server/ssh_known_hosts "$ssh_dir/known_hosts"
+          ssh-keygen -y -f "$ssh_dir/key" > /dev/null
+          options=(-i "$ssh_dir/key" -o BatchMode=yes -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$ssh_dir/known_hosts" \
+            -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+          target="root@$DEPLOY_HOST"
+          remote="/opt/mark/releases/$BUILD_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          ssh "${options[@]}" "$target" "umask 077; mkdir -p '$remote'"
+          scp "${options[@]}" release/images.tar.gz release/compose.yml release/configure.sh \
+            release/deploy.sh release/revision release/backend.id release/frontend.id release/SHA256SUMS "$target:$remote/"
+          ssh "${options[@]}" "$target" "cd '$remote' && sha256sum --check SHA256SUMS && bash deploy.sh" | tee "$RUNNER_TEMP/mark-deploy-result.log"
+          if grep -Fxq 'MARK_DEPLOY_STATUS=deployed' "$RUNNER_TEMP/mark-deploy-result.log"; then
+            printf '### Applications deployed\n\nRevision: `%s`\n\nHTTP verification URL: http://%s/\n' "$BUILD_SHA" "$DEPLOY_HOST" >> "$GITHUB_STEP_SUMMARY"
+          elif grep -Fxq 'MARK_DEPLOY_STATUS=needs-configuration' "$RUNNER_TEMP/mark-deploy-result.log"; then
+            printf '### Awaiting first-time server configuration — NOT LIVE\n\nImages are uploaded, but no application was started. Run these commands in the server terminal:\n\n```bash\nbash %s/configure.sh\nbash %s/deploy.sh\n```\n\nPasswords stay on the server. See deploy/server/README.md.\n' "$remote" "$remote" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Server did not report a recognized deployment result.' >&2
+            exit 1
+          fi

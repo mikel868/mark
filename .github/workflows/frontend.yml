@@ -1,8 +1,9 @@
 name: Frontend checks
 
 on:
+  workflow_call:
   push:
-    branches: ['**']
+    branches-ignore: ['main']
     paths:
       [
         'frontend/**',
