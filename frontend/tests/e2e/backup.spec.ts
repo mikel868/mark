@@ -2,9 +2,15 @@ import { expect, test } from '@playwright/test'
 
 import { loginAsAdmin } from './login'
 
-test('replaces server data from a validated backup file', async ({ page }) => {
+test('replaces server data from a validated backup without the HTTPS-only randomUUID API', async ({
+  page,
+}) => {
   await loginAsAdmin(page)
+  await page.addInitScript(() => {
+    Object.defineProperty(window.crypto, 'randomUUID', { value: undefined, configurable: true })
+  })
   await page.goto('/ins/backup')
+  expect(await page.evaluate(() => typeof window.crypto.randomUUID)).toBe('undefined')
 
   const now = new Date().toISOString()
   const backup = {
