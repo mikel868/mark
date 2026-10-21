@@ -13,7 +13,7 @@ export RELEASE_SHA="$revision"
 exec 9>"$root/deploy.lock"
 flock -w 300 9 || { echo 'Another deployment is running.' >&2; exit 1; }
 cd "$release_dir"
-for file in compose.yml configure.sh deploy.sh revision backend.id frontend.id SHA256SUMS; do
+for file in compose.yml configure.sh deploy.sh image-config-digest.sh revision backend.id frontend.id SHA256SUMS; do
   [[ -f "$file" ]] || { echo "Missing release file: $file" >&2; exit 1; }
 done
 sha256sum --check --ignore-missing SHA256SUMS
@@ -31,9 +31,9 @@ if [[ -f images.tar.gz ]]; then
 fi
 for service in backend frontend; do
   expected=$(cat "$service.id")
-  [[ "$expected" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Invalid image ID.' >&2; exit 1; }
-  actual=$(docker image inspect --format '{{.Id}}' "mark-$service:$revision")
-  [[ "$actual" == "$expected" ]] || { echo "Image ID mismatch: $service" >&2; exit 1; }
+  [[ "$expected" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'Invalid image configuration digest.' >&2; exit 1; }
+  actual=$(bash "$release_dir/image-config-digest.sh" "mark-$service:$revision")
+  [[ "$actual" == "$expected" ]] || { echo "Image configuration digest mismatch: $service" >&2; exit 1; }
 done
 # The loaded images are retained; remove only this release's transfer archive to save disk space.
 if [[ -f images.tar.gz ]]; then rm -- images.tar.gz; fi
