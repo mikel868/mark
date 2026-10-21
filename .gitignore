@@ -30,3 +30,5 @@ Thumbs.db
 *.dump
 *.sql.gz
 backups/
+backend.env
+.backend.env.*

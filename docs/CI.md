@@ -1,5 +1,13 @@
 # 单仓库 CI 与发布
 
+## 当前 GitHub 云服务器部署
+
+GitHub 仓库 `mikel868/mark` 的当前入口为 `.github/workflows/deploy.yml`。`main` 的 push 和手动运行先调用前端、后端、联调检查与部署脚本测试，再构建镜像并通过固定主机公钥的 SSH 上传到独立服务器。不使用下文的 Gitea 镜像仓库、发布开关或 Kubernetes 凭据。唯一部署 Secret 为 `DEPLOY_SSH_KEY`，数据库和初始化密码留在服务器。
+
+首次配置、HTTP 验证入口、内存限制与后续更新见 [独立云服务器部署](../deploy/server/README.md)。其他分支及 PR 继续运行检查，不获得部署密钥；`main` 由统一工作流调用检查，避免重复执行。下文记录旧 Gitea / Kubernetes 发布方式，不是当前 GitHub 部署步骤。
+
+## 历史 Gitea / Kubernetes 配置
+
 前端和后端现在都属于 `IP-Correction-Document`，工作流统一放在仓库根目录。
 
 | 平台   | 入口                                | 检查范围                                                               |
