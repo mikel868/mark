@@ -12,6 +12,12 @@ import {
 export const MAX_BACKUP_MEGABYTES = 100
 export const MAX_BACKUP_BYTES = MAX_BACKUP_MEGABYTES * 1024 * 1024
 
+export function createRestoreOperationId(): string {
+  // Unlike randomUUID, getRandomValues is available on ordinary HTTP origins.
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 const validDateTime = z.string().refine((value) => !Number.isNaN(Date.parse(value)))
 
 const baseEntitySchema = z.object({

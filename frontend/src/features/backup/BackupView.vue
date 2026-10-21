@@ -8,6 +8,7 @@ import { dataService } from '../../data/data-service'
 import { ApiError, downloadBlob } from '../../data/api-client'
 import {
   backupCounts,
+  createRestoreOperationId,
   MAX_BACKUP_BYTES,
   MAX_BACKUP_MEGABYTES,
   parseBackup,
@@ -65,6 +66,7 @@ async function selectFile(event: Event) {
   preview.value = null
   previewName.value = ''
   sourceFile.value = null
+  operationId.value = ''
   if (!file) return
   try {
     if (file.size > MAX_BACKUP_BYTES) {
@@ -72,10 +74,11 @@ async function selectFile(event: Event) {
     }
     const parsed = parseBackup(await file.text())
     if (sequence !== fileSelectionSequence) return
-    preview.value = parsed
+    const id = createRestoreOperationId()
+    operationId.value = id
     sourceFile.value = file
-    operationId.value = crypto.randomUUID()
     previewName.value = file.name
+    preview.value = parsed
     ElMessage.success('备份验证通过，请检查数量后确认恢复')
   } catch (error) {
     if (sequence !== fileSelectionSequence) return
@@ -86,7 +89,7 @@ async function selectFile(event: Event) {
 }
 
 async function restore() {
-  if (!preview.value || !sourceFile.value || importing.value) return
+  if (!preview.value || !sourceFile.value || !operationId.value || importing.value) return
   const file = sourceFile.value
   const id = operationId.value
   importing.value = true
