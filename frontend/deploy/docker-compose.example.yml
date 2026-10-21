@@ -1,0 +1,45 @@
+# Run from deploy with an explicitly supplied private --env-file.
+# Both modules live in the same repository: frontend/ and backend/.
+services:
+  appeal-manager:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: platform-appeal-manager:local
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:8088:80'
+    depends_on:
+      - backend
+  backend:
+    build:
+      context: ../../backend
+    restart: unless-stopped
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/appeal
+      DB_USERNAME: appeal
+      DB_PASSWORD: ${DB_PASSWORD:?Set database password}
+      INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME:-admin}
+      INITIAL_ADMIN_PASSWORD_HASH: ${INITIAL_ADMIN_PASSWORD_HASH:?Set admin BCrypt hash}
+      INITIAL_READONLY_USERNAME: ${INITIAL_READONLY_USERNAME:-user}
+      INITIAL_READONLY_PASSWORD_HASH: ${INITIAL_READONLY_PASSWORD_HASH:?Set readonly BCrypt hash}
+      SECURE_COOKIE: ${SECURE_COOKIE:-true}
+    depends_on:
+      postgres:
+        condition: service_healthy
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: appeal
+      POSTGRES_USER: appeal
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set database password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U appeal -d appeal']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  postgres-data:

@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ip-correction-backend-config
+  namespace: test
+data:
+  SERVER_PORT: "8080"
+  DB_URL: "jdbc:postgresql://postgres.default.svc.cluster.local:5678/mark"
+  DB_USERNAME: "postgres"
+  INITIAL_ADMIN_USERNAME: "admin"
+  INITIAL_READONLY_USERNAME: "user"
+  # 直接通过 HTTP NodePort 访问时使用 false；HTTPS 入口使用 true。
+  SECURE_COOKIE: "false"
+  # 备份导出使用 PVC 上的临时文件，业务数据仍存放在已有 PostgreSQL。
+  JAVA_TOOL_OPTIONS: "-Djava.io.tmpdir=/app/data"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ip-correction-nginx-config
+  namespace: test
+data:
+  nginx.conf: |
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log notice;
+    pid /var/run/nginx.pid;
+
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      include /etc/nginx/mime.types;
+      default_type application/octet-stream;
+      sendfile on;
+      keepalive_timeout 65;
+      server_tokens off;
+
+      server {
+        listen 80;
+        server_name _;
+        root /usr/share/nginx/html;
+        index index.html;
+        client_max_body_size 110m;
+
+        location ^~ /api/ {
+          # 使用同一命名空间中的 ClusterIP Service，保留原始 /api/ 路径。
+          proxy_pass http://ip-correction-backend:8080;
+          proxy_set_header Host $host;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_read_timeout 300s;
+          proxy_intercept_errors off;
+          add_header Cache-Control "no-store" always;
+        }
+
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+
+        location = /health {
+          access_log off;
+          default_type text/plain;
+          return 200 "ok\n";
+        }
+
+        location = /index.html {
+          expires -1;
+          try_files $uri =404;
+        }
+
+        location /assets/ {
+          expires 1y;
+          try_files $uri =404;
+        }
+
+        location / {
+          try_files $uri $uri/ /index.html;
+        }
+      }
+    }

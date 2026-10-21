@@ -1,0 +1,185 @@
+name: Frontend checks and release
+
+on:
+  push:
+    branches: ['**']
+    tags: ['frontend-v*']
+    paths:
+      - 'frontend/**'
+      - '.gitea/workflows/frontend.yml'
+      - '.gitignore'
+      - '.nvmrc'
+      - 'docs/**'
+      - 'README.md'
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - '.gitea/workflows/frontend.yml'
+      - '.gitignore'
+      - '.nvmrc'
+      - 'docs/**'
+      - 'README.md'
+
+defaults:
+  run:
+    shell: bash
+    working-directory: frontend
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run check:secrets
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run test:unit
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+      - name: Build image and verify static routing (backend deliberately absent)
+        env:
+          RUN_KEY: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          name="mark-frontend-ci-$RUN_KEY"
+          trap 'docker rm -f "$name-probe" "$name" >/dev/null 2>&1 || true; docker network rm "$name" >/dev/null 2>&1 || true; docker image rm "$name" >/dev/null 2>&1 || true' EXIT
+          docker build -t "$name" .
+          docker network create "$name"
+          docker run -d --name "$name" --network "$name" "$name"
+          docker run --rm -i --name "$name-probe" --network "$name" \
+            -e APP_URL="http://$name" node:24-alpine node --input-type=module < tests/smoke/container-smoke.mjs
+
+  publish:
+    needs: verify
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/frontend-v'))
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    env:
+      REGISTRY: ${{ vars.REGISTRY }}
+      IMAGE_NAME: ${{ vars.FRONTEND_IMAGE_NAME }}
+      REGISTRY_USERNAME: ${{ vars.REGISTRY_USERNAME }}
+      DOCKER_CONFIG: ${{ runner.temp }}/mark-frontend-docker-${{ github.run_id }}-${{ github.run_attempt }}
+      BUILD_SHA: ${{ github.sha }}
+      BUILD_REF: ${{ github.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read application version
+        id: version
+        run: |
+          version=$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || { echo "Invalid application version"; exit 1; }
+          if [[ "$BUILD_REF" == refs/tags/* && "$BUILD_REF" != "refs/tags/frontend-v$version" ]]; then
+            echo "Release tag must match application version: frontend-v$version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build and publish exact revision
+        id: image
+        env:
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          : "${REGISTRY:?Set REGISTRY}"
+          : "${IMAGE_NAME:?Set IMAGE_NAME}"
+          : "${REGISTRY_USERNAME:?Set REGISTRY_USERNAME}"
+          : "${REGISTRY_PASSWORD:?Set REGISTRY_PASSWORD secret}"
+          umask 077
+          mkdir -p "$DOCKER_CONFIG"
+          trap 'rm -f "$DOCKER_CONFIG/config.json"; rmdir "$DOCKER_CONFIG" 2>/dev/null || true' EXIT
+          printf '%s' "$REGISTRY_PASSWORD" | docker login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin
+          repository="$REGISTRY/$IMAGE_NAME"
+          tag="$repository:$APP_VERSION-$BUILD_SHA"
+          docker build --label "org.opencontainers.image.version=$APP_VERSION" \
+            --label "org.opencontainers.image.revision=$BUILD_SHA" -t "$tag" .
+          docker push "$tag"
+          image=$(docker image inspect "$tag" --format '{{index .RepoDigests 0}}')
+          [[ "$image" == "$repository@sha256:"* ]] || { echo "Missing pushed image digest"; exit 1; }
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "Published: $tag"
+          echo "Deployment image: $image"
+
+  deploy:
+    needs: publish
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      K8S_NAMESPACE: ${{ vars.FRONTEND_K8S_NAMESPACE }}
+      K8S_DEPLOYMENT_NAME: ${{ vars.FRONTEND_K8S_DEPLOYMENT_NAME }}
+      K8S_CONTAINER_NAME: ${{ vars.FRONTEND_K8S_CONTAINER_NAME }}
+      IMAGE: ${{ needs.publish.outputs.image }}
+      RELEASE_BRANCH: main
+      BUILD_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require cluster-compatible kubectl version
+        env:
+          KUBECTL_VERSION: ${{ vars.KUBECTL_VERSION }}
+        run: ': "${KUBECTL_VERSION:?Set an explicit kubectl version compatible with the cluster}"'
+      - uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ vars.KUBECTL_VERSION }}
+      - name: Update existing deployment and verify rollout
+        env:
+          LOCAL_KUBECONFIG: ${{ secrets.LOCAL_KUBECONFIG }}
+        run: |
+          : "${K8S_NAMESPACE:?Set K8S_NAMESPACE}"
+          : "${K8S_DEPLOYMENT_NAME:?Set K8S_DEPLOYMENT_NAME}"
+          : "${K8S_CONTAINER_NAME:?Set K8S_CONTAINER_NAME}"
+          : "${LOCAL_KUBECONFIG:?Set base64 LOCAL_KUBECONFIG secret}"
+          : "${IMAGE:?No published image}"
+          umask 077
+          work=$(mktemp -d)
+          trap 'rm -f "$work/config" "$work/deployment.json" "$work/patch.json"; rmdir "$work"' EXIT
+          export KUBECONFIG="$work/config"
+          printf '%s' "$LOCAL_KUBECONFIG" | base64 --decode > "$KUBECONFIG"
+          unset LOCAL_KUBECONFIG
+          # Snapshot before checking the branch; resourceVersion prevents concurrent overwrites.
+          kubectl -n "$K8S_NAMESPACE" get deployment "$K8S_DEPLOYMENT_NAME" -o json > "$work/deployment.json"
+          git fetch --no-tags origin "refs/heads/$RELEASE_BRANCH"
+          if ! git merge-base --is-ancestor "$BUILD_SHA" FETCH_HEAD ||
+             ! git -C .. diff --quiet "$BUILD_SHA" FETCH_HEAD -- frontend .gitea/workflows/frontend.yml .gitignore .nvmrc docs README.md; then
+            echo "Frontend release inputs changed or this commit left the release branch; skipping outdated deployment."
+            exit 0
+          fi
+          python3 - "$work/deployment.json" "$work/patch.json" <<'PY'
+          import json, os, sys
+          with open(sys.argv[1]) as source:
+              deployment = json.load(source)
+          containers = deployment["spec"]["template"]["spec"]["containers"]
+          index = next((i for i, item in enumerate(containers)
+                        if item["name"] == os.environ["K8S_CONTAINER_NAME"]), None)
+          if index is None:
+              raise SystemExit("Configured container does not exist; no changes applied")
+          patch = [
+              {"op": "test", "path": "/metadata/resourceVersion",
+               "value": deployment["metadata"]["resourceVersion"]},
+              {"op": "replace", "path": f"/spec/template/spec/containers/{index}/image",
+               "value": os.environ["IMAGE"]},
+          ]
+          with open(sys.argv[2], "w") as target:
+              json.dump(patch, target)
+          PY
+          kubectl -n "$K8S_NAMESPACE" patch deployment "$K8S_DEPLOYMENT_NAME" --type=json --patch-file "$work/patch.json"
+          if ! kubectl -n "$K8S_NAMESPACE" rollout status "deployment/$K8S_DEPLOYMENT_NAME" --timeout=300s; then
+            kubectl -n "$K8S_NAMESPACE" get deployment "$K8S_DEPLOYMENT_NAME" -o wide || true
+            echo "Rollout failed; inspect the deployment. No automatic rollback was attempted."
+            exit 1
+          fi
+          current=$(kubectl -n "$K8S_NAMESPACE" get deployment "$K8S_DEPLOYMENT_NAME" -o json)
+          printf '%s' "$current" | python3 -c 'import json,os,sys; d=json.load(sys.stdin); c=next(c for c in d["spec"]["template"]["spec"]["containers"] if c["name"]==os.environ["K8S_CONTAINER_NAME"]); sys.exit(0 if c["image"]==os.environ["IMAGE"] else "Deployment was superseded by another release")'
+          echo "Deployment ready: $K8S_DEPLOYMENT_NAME ($IMAGE)"

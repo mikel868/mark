@@ -1,0 +1,87 @@
+name: Frontend and backend integration
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      [
+        'frontend/**',
+        'backend/**',
+        '.github/workflows/integration.yml',
+        '.gitignore',
+        '.nvmrc',
+        'docs/**',
+        'README.md',
+      ]
+  pull_request:
+    paths:
+      [
+        'frontend/**',
+        'backend/**',
+        '.github/workflows/integration.yml',
+        '.gitignore',
+        '.nvmrc',
+        'docs/**',
+        'README.md',
+      ]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: appeal_test
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: appeal_backend_test
+        ports: ['55439:5432']
+        options: --health-cmd="pg_isready -U appeal_test -d appeal_backend_test" --health-interval=5s --health-retries=20
+    env:
+      TEST_DB_URL: jdbc:postgresql://127.0.0.1:55439/appeal_backend_test
+      TEST_DB_USERNAME: appeal_test
+      TEST_DB_PASSWORD: test-only
+      E2E_ISOLATED: '1'
+      BACKEND_URL: http://127.0.0.1:18080
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: chmod +x mvnw
+        working-directory: backend
+      - run: ./mvnw -B test
+        working-directory: backend
+      - name: Start disposable backend using test accounts seeded by its test suite
+        working-directory: backend
+        env:
+          PGPASSWORD: test-only
+        run: |
+          export DB_URL="$TEST_DB_URL" DB_USERNAME="$TEST_DB_USERNAME" DB_PASSWORD="$TEST_DB_PASSWORD"
+          export INITIAL_ADMIN_USERNAME=test-admin INITIAL_READONLY_USERNAME=test-reader SECURE_COOKIE=false
+          export INITIAL_ADMIN_PASSWORD_HASH="$(psql -h 127.0.0.1 -p 55439 -U appeal_test -d appeal_backend_test -Atc "select password_hash from app_users where username='test-admin'")"
+          export INITIAL_READONLY_PASSWORD_HASH="$INITIAL_ADMIN_PASSWORD_HASH"
+          ./mvnw -B spring-boot:run -Dspring-boot.run.arguments=--server.port=18080 > /tmp/appeal-test-backend.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18080/actuator/health/readiness; then exit 0; fi
+            sleep 1
+          done
+          tail -n 100 /tmp/appeal-test-backend.log
+          exit 1
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npm run test:e2e
+        working-directory: frontend

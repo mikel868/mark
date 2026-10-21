@@ -1,0 +1,146 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ip-correction-backend
+  namespace: test
+spec:
+  replicas: 1
+  # 避免更新期间两个 Pod 同时挂载同一个 ReadWriteOnce PVC。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ip-correction-backend
+  template:
+    metadata:
+      labels:
+        app: ip-correction-backend
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ipipd-aliyun
+      securityContext:
+        fsGroup: 2000
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: init-data-permissions
+          image: registry.cn-shenzhen.aliyuncs.com/ipipd/ip-correction-backend:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              chgrp 2000 /app/data
+              chmod g+rwx,g+s /app/data
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          volumeMounts:
+            - name: ipipd-data
+              mountPath: /app/data
+              subPath: ip-correction-backend
+      containers:
+        - name: backend
+          # 替换为实际已推送的后端镜像地址。
+          image: registry.cn-shenzhen.aliyuncs.com/ipipd/ip-correction-backend:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: ip-correction-backend-config
+            - secretRef:
+                name: ip-correction-backend-secret
+          volumeMounts:
+            - name: ipipd-data
+              mountPath: /app/data
+              subPath: ip-correction-backend
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: ipipd-data
+          persistentVolumeClaim:
+            claimName: test-pv-claim
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ip-correction-frontend
+  namespace: test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ip-correction-frontend
+  template:
+    metadata:
+      labels:
+        app: ip-correction-frontend
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: ipipd-aliyun
+      containers:
+        - name: frontend
+          # 替换为实际已推送的前端镜像地址。
+          image: registry.cn-shenzhen.aliyuncs.com/ipipd/ip-correction-frontend:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 12
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: ip-correction-nginx-config

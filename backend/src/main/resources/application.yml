@@ -1,0 +1,57 @@
+server:
+  port: ${SERVER_PORT:8080}
+  error:
+    include-message: never
+    include-stacktrace: never
+spring:
+  config:
+    import: optional:file:./config/application-local.yml
+  application:
+    name: appeal-backend
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://${DB_HOST:postgres.default.svc.local.k8s.ipipd.top}:${DB_PORT:5678}/${DB_NAME:mark}}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 10
+  session:
+    timeout: 8h
+    jdbc:
+      initialize-schema: never
+  flyway:
+    validate-on-migrate: true
+    clean-disabled: true
+    placeholders:
+      adminUsername: ${INITIAL_ADMIN_USERNAME}
+      adminPasswordHash: ${INITIAL_ADMIN_PASSWORD_HASH}
+      readonlyUsername: ${INITIAL_READONLY_USERNAME}
+      readonlyPasswordHash: ${INITIAL_READONLY_PASSWORD_HASH}
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 101MB
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: input
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db
+app:
+  secure-cookie: ${SECURE_COOKIE:true}

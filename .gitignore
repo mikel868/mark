@@ -1,0 +1,32 @@
+# Dependencies and generated output
+node_modules/
+dist/
+coverage/
+.vite/
+playwright-report/
+test-results/
+*.log
+
+# Machine-local editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Machine-local configuration (kept on disk, never bundled into frontend auth).
+.env
+.env.*
+!.env.example
+.env.local
+.env.*.local
+/deploy/k8s/secret*.yaml
+!/deploy/k8s/secret.example.yaml
+
+# Private keys, database dumps and business-data backups
+*.pem
+*.key
+*.p12
+*.pfx
+*.dump
+*.sql.gz
+backups/
