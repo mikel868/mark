@@ -79,12 +79,12 @@ jobs:
         run: |
           mkdir -p release
           docker save "mark-backend:$BUILD_SHA" "mark-frontend:$BUILD_SHA" | gzip -1 > release/images.tar.gz
-          docker image inspect --format '{{.Id}}' "mark-backend:$BUILD_SHA" > release/backend.id
-          docker image inspect --format '{{.Id}}' "mark-frontend:$BUILD_SHA" > release/frontend.id
+          bash deploy/server/image-config-digest.sh "mark-backend:$BUILD_SHA" > release/backend.id
+          bash deploy/server/image-config-digest.sh "mark-frontend:$BUILD_SHA" > release/frontend.id
           printf '%s\n' "$BUILD_SHA" > release/revision
-          cp deploy/server/compose.yml deploy/server/configure.sh deploy/server/deploy.sh release/
+          cp deploy/server/compose.yml deploy/server/configure.sh deploy/server/deploy.sh deploy/server/image-config-digest.sh release/
           cd release
-          sha256sum images.tar.gz compose.yml configure.sh deploy.sh revision backend.id frontend.id > SHA256SUMS
+          sha256sum images.tar.gz compose.yml configure.sh deploy.sh image-config-digest.sh revision backend.id frontend.id > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: server-release
@@ -140,7 +140,7 @@ jobs:
           remote="/opt/mark/releases/$BUILD_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           ssh "${options[@]}" "$target" "umask 077; mkdir -p '$remote'"
           scp "${options[@]}" release/images.tar.gz release/compose.yml release/configure.sh \
-            release/deploy.sh release/revision release/backend.id release/frontend.id release/SHA256SUMS "$target:$remote/"
+            release/deploy.sh release/image-config-digest.sh release/revision release/backend.id release/frontend.id release/SHA256SUMS "$target:$remote/"
           ssh "${options[@]}" "$target" "cd '$remote' && sha256sum --check SHA256SUMS && bash deploy.sh" | tee "$RUNNER_TEMP/mark-deploy-result.log"
           if grep -Fxq 'MARK_DEPLOY_STATUS=deployed' "$RUNNER_TEMP/mark-deploy-result.log"; then
             printf '### Applications deployed\n\nRevision: `%s`\n\nHTTP verification URL: http://%s/\n' "$BUILD_SHA" "$DEPLOY_HOST" >> "$GITHUB_STEP_SUMMARY"

@@ -27,6 +27,9 @@ function fixture(
     databaseRunning = true,
     failUpdate = false,
     archive = false,
+    storage = "classic",
+    manifest,
+    saveFails = false,
   } = {},
 ) {
   const root = mkdtempSync(path.join(tmpdir(), "mark-deploy-test-"));
@@ -35,9 +38,31 @@ function fixture(
   const bin = path.join(root, "bin");
   mkdirSync(release, { recursive: true });
   mkdirSync(bin);
-  for (const file of ["deploy.sh", "configure.sh", "compose.yml"]) {
+  for (const file of [
+    "deploy.sh",
+    "configure.sh",
+    "compose.yml",
+    "image-config-digest.sh",
+  ]) {
     copyFileSync(path.join(source, file), path.join(release, file));
   }
+  const exported = path.join(root, "exported");
+  mkdirSync(exported);
+  writeFileSync(
+    path.join(exported, "manifest.json"),
+    JSON.stringify(
+      manifest ?? [
+        {
+          Config:
+            storage === "classic"
+              ? `${imageId.slice(7)}.json`
+              : `blobs/sha256/${imageId.slice(7)}`,
+          RepoTags: [`mark-backend:${revision}`],
+          Layers: [],
+        },
+      ],
+    ),
+  );
   writeFileSync(path.join(release, "revision"), `${revision}\n`);
   writeFileSync(path.join(release, "backend.id"), `${imageId}\n`);
   writeFileSync(path.join(release, "frontend.id"), `${imageId}\n`);
@@ -66,7 +91,14 @@ case "$1" in
   inspect)
     if [[ "$*" == *'.State.Running'* ]]; then echo '${databaseRunning}';
     elif [[ "$*" == *'.Mounts'* ]]; then echo mark-postgres-data; fi ;;
-  image) echo '${imageId}' ;;
+  image)
+    case "$2" in
+      inspect) echo '${storage === "classic" ? imageId : `sha256:${"d".repeat(64)}`}' ;;
+      save)
+        cat "$DOCKER_TEST_IMAGE_ARCHIVE"
+        if [[ '${saveFails}' == true ]]; then exit 1; fi ;;
+      *) exit 1 ;;
+    esac ;;
   load) cat >/dev/null ;;
   compose)
     if [[ "$*" == *' up '* && '${failUpdate}' == true ]]; then exit 1; fi ;;
@@ -79,6 +111,9 @@ esac
   const env = {
     ...process.env,
     DOCKER_TEST_LOG: log,
+    DOCKER_TEST_IMAGE_ARCHIVE: path
+      .join(root, "exported.tar")
+      .replaceAll("\\", "/"),
     MSYS: "winsymlinks:nativestrict",
   };
   const originalPath =
@@ -91,7 +126,7 @@ esac
     bash,
     [
       "-c",
-      `sha256sum compose.yml configure.sh deploy.sh revision backend.id frontend.id${archive ? " images.tar.gz" : ""} > SHA256SUMS`,
+      `tar -cf ../../exported.tar -C ../../exported manifest.json && sha256sum compose.yml configure.sh deploy.sh image-config-digest.sh revision backend.id frontend.id${archive ? " images.tar.gz" : ""} > SHA256SUMS`,
     ],
     {
       cwd: release,
@@ -158,7 +193,15 @@ test("failed container update does not report the revision as deployed", (t) => 
   assert.ok(!existsSync(path.join(f.root, "current-release")));
 });
 
-test("unexpected loaded image ID stops deployment", (t) => {
+test("containerd image ID may differ while the saved configuration digest matches", (t) => {
+  const f = fixture(t, { configured: true, storage: "containerd" });
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /MARK_DEPLOY_STATUS=deployed/);
+  assert.doesNotMatch(f.log(), /image inspect/);
+});
+
+test("unexpected loaded configuration digest stops deployment", (t) => {
   const f = fixture(t, { configured: true });
   writeFileSync(
     path.join(f.release, "backend.id"),
@@ -169,7 +212,7 @@ test("unexpected loaded image ID stops deployment", (t) => {
     bash,
     [
       "-c",
-      "sha256sum compose.yml configure.sh deploy.sh revision backend.id frontend.id > SHA256SUMS",
+      "sha256sum compose.yml configure.sh deploy.sh image-config-digest.sh revision backend.id frontend.id > SHA256SUMS",
     ],
     {
       cwd: f.release,
@@ -180,9 +223,36 @@ test("unexpected loaded image ID stops deployment", (t) => {
   assert.equal(result.status, 0, result.stderr);
   const failure = f.run();
   assert.notEqual(failure.status, 0);
-  assert.match(failure.stderr, /Image ID mismatch/);
+  assert.match(failure.stderr, /Image configuration digest mismatch/);
   assert.doesNotMatch(f.log(), /\bup\b/);
 });
+
+for (const [name, options] of [
+  [
+    "different config despite a matching daemon ID",
+    { manifest: [{ Config: `${"c".repeat(64)}.json` }] },
+  ],
+  ["invalid config path", { manifest: [{ Config: "../../invalid" }] }],
+  [
+    "multiple configurations",
+    {
+      manifest: [
+        { Config: `${imageId.slice(7)}.json` },
+        { Config: `${imageId.slice(7)}.json` },
+      ],
+    },
+  ],
+  ["missing configuration", { manifest: [] }],
+  ["failed image export", { saveFails: true }],
+]) {
+  test(`${name} stops deployment before changing applications`, (t) => {
+    const f = fixture(t, { configured: true, ...options });
+    const result = f.run();
+    assert.notEqual(result.status, 0);
+    assert.doesNotMatch(f.log(), /\bcompose\b/);
+    assert.ok(!existsSync(path.join(f.root, "current-release")));
+  });
+}
 
 test("archive is loaded once and removed, while a retry can use the retained image", (t) => {
   const f = fixture(t, { archive: true });
